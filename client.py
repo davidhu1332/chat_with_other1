@@ -228,6 +228,7 @@ class ChatClient:
         self.max_history = 100  # 最大历史消息数量
         self.settings = self.load_settings()  # 加载设置
         self.is_admin = False  # 标记当前用户是否为管理员
+        self.user_roles = {}  # 存储用户角色
         
         # 创建GUI
         self.root = Tk()
@@ -460,9 +461,39 @@ class ChatClient:
                         self.root.after(0, lambda u=users: self.update_user_list(u))
                         
                     elif message.startswith("USER_LIST:"):
-                        # 用户列表（兼容新格式）
-                        users = message[10:].split(",")
-                        self.root.after(0, lambda u=users: self.update_user_list(u))
+                        try:
+                            # 尝试解析JSON格式的用户列表
+                            list_data = message[10:]
+                            try:
+                                # 尝试作为JSON解析
+                                user_data = json.loads(list_data)
+                                # 初始化用户角色字典
+                                self.user_roles = {}
+                                users = []
+                                
+                                # 提取用户名和角色信息
+                                for user in user_data:
+                                    username = user.get("username", "")
+                                    is_admin = user.get("is_admin", False)
+                                    is_muted = user.get("is_muted", False)
+                                    
+                                    if username:
+                                        users.append(username)
+                                        self.user_roles[username] = {
+                                            "is_admin": is_admin,
+                                            "is_muted": is_muted
+                                        }
+                                
+                                # 更新用户列表
+                                self.root.after(0, lambda u=users: self.update_user_list(u))
+                            except json.JSONDecodeError:
+                                # 如果不是JSON格式，按原来方式处理
+                                users = list_data.split(",")
+                                self.root.after(0, lambda u=users: self.update_user_list(u))
+                        except Exception as e:
+                            # 如果处理失败，回退到简单格式
+                            users = message[10:].split(",")
+                            self.root.after(0, lambda u=users: self.update_user_list(u))
                     
                     elif message.startswith("[私信 from"):
                         # 接收到的私聊消息
@@ -800,15 +831,6 @@ class ChatClient:
             self.root.destroy()
             
     def run(self):
-        # 定期请求用户列表的定时器
-        def auto_refresh_users():
-            if self.connected:
-                self.request_user_list()
-            self.root.after(30000, auto_refresh_users)  # 每30秒刷新一次
-        
-        # 启动定时刷新
-        self.root.after(30000, auto_refresh_users)
-        
         # 启动主循环
         self.root.protocol("WM_DELETE_WINDOW", self.exit_app)
         self.root.mainloop()
@@ -996,8 +1018,13 @@ class ChatClient:
         if self.connected:
             # 向服务器请求最新用户列表
             try:
-                self.client.send("/用户列表".encode('utf-8'))
-                # 用户列表会在receive方法中更新
+                # 发送用户列表请求，使用特定请求来获取包含角色信息的用户列表
+                self.client.send("/用户列表_详细".encode('utf-8'))
+                
+                # 等待服务器响应以获取最新的用户角色信息
+                # 在 receive 方法中会接收并更新 self.user_roles
+                # 为避免界面阻塞，设置一个短暂延迟，让服务器响应有时间处理
+                time.sleep(0.3)
                 
                 # 添加现有用户
                 for user in self.users_listbox.get(0, END):
@@ -1006,11 +1033,17 @@ class ChatClient:
                         username = username.replace(" (你)", "")
                     
                     status = "在线"
-                    perm = "普通用户"
+                    perm = "普通用户"  # 默认值
                     
-                    if username == self.username:
-                        if self.is_admin:
+                    # 先从用户角色字典中查找用户状态
+                    if hasattr(self, 'user_roles') and username in self.user_roles:
+                        if self.user_roles[username]["is_admin"]:
                             perm = "管理员"
+                        if self.user_roles[username]["is_muted"]:
+                            status = "已禁言"
+                    # 如果是自己且是管理员，确保显示正确
+                    elif username == self.username and self.is_admin:
+                        perm = "管理员"
                     
                     tree.insert('', END, values=(username, status, perm))
             except Exception as e:
@@ -1275,6 +1308,9 @@ class ChatClient:
             
             # 检查是否为管理员
             self.check_admin_status()
+            
+            # 立即请求用户列表
+            self.request_user_list()
             
             return True
         else:

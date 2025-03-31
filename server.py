@@ -298,6 +298,9 @@ class ChatServer:
         index = self.clients.index(client)
         nickname = self.nicknames[index]
         
+        # 添加短暂延迟，确保客户端完成之前的通信
+        time.sleep(0.3)
+        
         # 发送欢迎消息
         client.send("欢迎加入聊天室!".encode('utf-8'))
         
@@ -316,6 +319,9 @@ class ChatServer:
                     if decoded == "/用户列表":
                         # 发送用户列表
                         self.send_user_list(client)
+                    elif decoded == "/用户列表_详细":
+                        # 发送详细用户列表（仅包含JSON格式，不发送简单格式）
+                        self.send_detailed_user_list(client)
                     elif decoded.startswith("/私聊 "):
                         # 格式: /私聊 用户名 消息内容
                         parts = decoded[4:].split(" ", 1)
@@ -372,6 +378,7 @@ class ChatServer:
         """发送帮助信息"""
         help_msg = "可用命令:\n"
         help_msg += "/用户列表 - 获取当前在线用户列表\n"
+        help_msg += "/用户列表_详细 - 获取包含用户角色的详细在线用户列表\n"
         help_msg += "/私聊 用户名 消息 - 发送私聊消息\n"
         help_msg += "/帮助 - 显示此帮助信息\n"
         help_msg += "/我是管理员吗 - 查询自己的管理员状态\n"
@@ -388,10 +395,11 @@ class ChatServer:
     def mute_user(self, admin_nick, target_nick):
         """管理员禁言用户"""
         if target_nick in self.users_data['users']:
-            if self.users_data['users'][target_nick].get('is_admin', False) and admin_nick != target_nick:
-                # 不能禁言其他管理员
-                self.send_message_to_user(admin_nick, f"错误: 不能禁言管理员")
-                return
+            # 移除不能禁言管理员的限制，允许管理员禁言任何人包括其他管理员
+            # if self.users_data['users'][target_nick].get('is_admin', False) and admin_nick != target_nick:
+            #     # 不能禁言其他管理员
+            #     self.send_message_to_user(admin_nick, f"错误: 不能禁言管理员")
+            #     return
             
             # 更新内存中的禁言状态
             self.users_data['users'][target_nick]['is_muted'] = True
@@ -421,8 +429,9 @@ class ChatServer:
     def kick_user_by_name(self, admin_nick, target_nick):
         """管理员踢出用户"""
         if target_nick in self.nicknames:
-            if target_nick in self.users_data['users'] and self.users_data['users'][target_nick].get('is_admin', False) and admin_nick != target_nick:
-                # 不能踢出其他管理员
+            # 检查是否是管理员踢出管理员（非服务器操作）
+            if admin_nick != "服务器" and target_nick in self.users_data['users'] and self.users_data['users'][target_nick].get('is_admin', False):
+                # 不允许管理员踢出其他管理员
                 self.send_message_to_user(admin_nick, f"错误: 不能踢出管理员")
                 return
             
@@ -431,16 +440,16 @@ class ChatServer:
             
             # 发送踢出消息
             try:
-                client.send(f"[服务器公告] 您已被管理员 {admin_nick} 踢出聊天室".encode('utf-8'))
+                client.send(f"[服务器公告] 您已被{'服务器' if admin_nick == '服务器' else '管理员 ' + admin_nick} 踢出聊天室".encode('utf-8'))
             except:
                 pass
             
             # 移除客户端
             self.remove_client(client)
-            self.log_message(f"用户 {target_nick} 被管理员 {admin_nick} 踢出")
+            self.log_message(f"用户 {target_nick} 被{'服务器' if admin_nick == '服务器' else '管理员 ' + admin_nick} 踢出")
             
             # 广播消息
-            self.broadcast(f"[服务器公告] 用户 {target_nick} 已被 {admin_nick} 踢出聊天室".encode('utf-8'))
+            self.broadcast(f"[服务器公告] 用户 {target_nick} 已被{'服务器' if admin_nick == '服务器' else '管理员 ' + admin_nick} 踢出聊天室".encode('utf-8'))
         else:
             self.send_message_to_user(admin_nick, f"错误: 用户 {target_nick} 不存在或未在线")
     
@@ -562,6 +571,9 @@ class ChatServer:
                             
                             # 广播新客户端加入的消息
                             self.broadcast(f"{username} 加入了聊天!".encode('utf-8'))
+                            
+                            # 添加延迟，确保客户端能正确接收消息
+                            time.sleep(0.3)
                             
                             # 向所有客户端发送更新后的用户列表
                             self.broadcast_user_list()
@@ -1201,8 +1213,10 @@ class ChatServer:
                 # 发送JSON格式的用户列表
                 client.send(user_list_message.encode('utf-8'))
                 
+                # 添加足够的延迟，确保消息不会混合
+                time.sleep(0.3)  # 增加延迟时间，避免消息混淆
+                
                 # 发送简单格式的用户列表（确保客户端能够正确显示）
-                time.sleep(0.1)  # 短暂延迟，避免消息混淆
                 client.send(simple_user_list_message.encode('utf-8'))
             except:
                 # 如果发送失败，客户端可能已断开连接
@@ -1244,6 +1258,38 @@ class ChatServer:
             # 发送简单格式的用户列表（确保客户端能够正确显示）
             time.sleep(0.1)  # 短暂延迟，避免消息混淆
             client.send(simple_user_list_message.encode('utf-8'))
+        except:
+            # 如果发送失败，客户端可能已断开连接
+            pass
+
+    def send_detailed_user_list(self, client):
+        """向特定客户端发送详细用户列表（只包含JSON格式，不发送简单格式）"""
+        # 构建完整的用户状态列表
+        user_status_list = []
+        for nickname in self.nicknames:
+            # 获取用户状态
+            is_admin = False
+            is_muted = False
+            if nickname in self.users_data['users']:
+                is_admin = self.users_data['users'][nickname].get('is_admin', False)
+                is_muted = self.users_data['users'][nickname].get('is_muted', False)
+            
+            # 添加到状态列表
+            user_status_list.append({
+                "username": nickname,
+                "is_admin": is_admin,
+                "is_muted": is_muted
+            })
+        
+        # 将用户列表转换为JSON字符串
+        user_list_json = json.dumps(user_status_list)
+        
+        # 发送JSON格式的用户列表
+        user_list_message = f"USER_LIST:{user_list_json}"
+        
+        try:
+            # 只发送JSON格式的用户列表，不发送简单格式
+            client.send(user_list_message.encode('utf-8'))
         except:
             # 如果发送失败，客户端可能已断开连接
             pass
