@@ -1395,7 +1395,7 @@ class ChatClient:
         # 创建修改密码对话框
         change_window = Toplevel(self.root)
         change_window.title("修改密码")
-        change_window.geometry("350x300")
+        change_window.geometry("400x250")
         change_window.transient(self.root)  # 设置为主窗口的子窗口
         change_window.grab_set()  # 模态窗口
 
