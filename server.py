@@ -838,7 +838,7 @@ class ChatServer:
         default_data = {
             "users": {
                 "admin": {
-                    "password": "123456",
+                    "password": hashlib.sha256("123456".encode()).hexdigest(),
                     "is_admin": True,
                     "is_muted": False,
                     "registered_date": datetime.datetime.now().isoformat()
