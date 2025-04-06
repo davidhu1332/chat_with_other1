@@ -4,6 +4,9 @@ import time
 import json
 import os
 import hashlib
+import http.client
+import urllib.parse
+import shutil
 from tkinter import *
 from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 
@@ -244,10 +247,14 @@ class ChatClient:
         self.is_admin = False  # 标记当前用户是否为管理员
         self.user_roles = {}  # 存储用户角色
 
+        # 文件相关变量
+        self.public_files = []  # 公共文件列表
+        self.private_files = []  # 私人文件列表
+
         # 创建GUI
         self.root = Tk()
         self.root.title("聊天客户端")
-        self.root.geometry("800x550")
+        self.root.geometry("1000x550")  # 调整窗口尺寸以适应文件列表
         self.root.resizable(True, True)
         self.create_widgets()
         self.apply_settings()  # 应用加载的设置
@@ -290,11 +297,15 @@ class ChatClient:
         # 左侧用户列表面板
         users_frame = ttk.LabelFrame(pane, text="用户列表")
 
-        # 右侧消息面板
+        # 中间消息面板
         message_frame = ttk.LabelFrame(pane, text="消息")
+
+        # 右侧文件列表面板
+        files_frame = ttk.LabelFrame(pane, text="文件")
 
         pane.add(users_frame, weight=1)
         pane.add(message_frame, weight=3)
+        pane.add(files_frame, weight=1)
 
         # 用户列表
         self.users_listbox = Listbox(users_frame, height=20)
@@ -341,7 +352,43 @@ class ChatClient:
         self.message_entry.bind("<Return>", self.send_message)
 
         send_button = ttk.Button(input_frame, text="发送", command=self.send_message)
-        send_button.pack(side=RIGHT)
+        send_button.pack(side=LEFT)
+
+        # 发送文件按钮
+        send_file_button = ttk.Button(input_frame, text="发送文件", command=self.send_file)
+        send_file_button.pack(side=LEFT, padx=5)
+
+        # 文件显示区域
+        files_notebook = ttk.Notebook(files_frame)
+        files_notebook.pack(fill=BOTH, expand=True, padx=5, pady=5)
+
+        # 公共文件标签页
+        public_files_frame = ttk.Frame(files_notebook)
+        files_notebook.add(public_files_frame, text="公共文件")
+
+        # 私人文件标签页
+        private_files_frame = ttk.Frame(files_notebook)
+        files_notebook.add(private_files_frame, text="私人文件")
+
+        # 公共文件列表
+        self.public_files_listbox = Listbox(public_files_frame, height=20)
+        self.public_files_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+        public_files_scrollbar = ttk.Scrollbar(public_files_frame, orient=VERTICAL, command=self.public_files_listbox.yview)
+        public_files_scrollbar.pack(side=RIGHT, fill=Y)
+        self.public_files_listbox.config(yscrollcommand=public_files_scrollbar.set)
+
+        # 绑定双击事件
+        self.public_files_listbox.bind('<Double-1>', lambda e: self.show_file_download_dialog("public"))
+
+        # 私人文件列表
+        self.private_files_listbox = Listbox(private_files_frame, height=20)
+        self.private_files_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+        private_files_scrollbar = ttk.Scrollbar(private_files_frame, orient=VERTICAL, command=self.private_files_listbox.yview)
+        private_files_scrollbar.pack(side=RIGHT, fill=Y)
+        self.private_files_listbox.config(yscrollcommand=private_files_scrollbar.set)
+
+        # 绑定双击事件
+        self.private_files_listbox.bind('<Double-1>', lambda e: self.show_file_download_dialog("private"))
 
         # 状态栏
         status_frame = ttk.Frame(self.root)
@@ -453,10 +500,10 @@ class ChatClient:
             self.add_system_message("已断开与服务器的连接")
 
     def receive(self):
+        """接收服务器消息的线程函数"""
         while self.connected:
             try:
                 message = self.client.recv(1024).decode('utf-8')
-
                 if message:
                     # 处理不同类型的消息
                     if message.startswith("[系统消息]"):
@@ -554,89 +601,48 @@ class ChatClient:
                         self.is_admin = True
                         self.root.after(0, self.enable_admin_menu)
 
+                    elif message.startswith('/用户列表 '):
+                        # 处理用户列表
+                        users = message[6:].split(',')
+                        self.update_user_list(users)
+
+                    elif message.startswith('/详细用户列表 '):
+                        # 处理详细用户列表（JSON格式）
+                        json_data = message[8:]
+                        self.process_detailed_user_list(json_data)
+
+                    elif message.startswith('/文件信息 '):
+                        # 处理文件信息
+                        # 格式: /文件信息 发送者 时间戳 文件名 文件大小 类型(public/private)
+                        parts = message[6:].split(' ', 4)
+                        if len(parts) == 5:
+                            sender, timestamp, filename, size, file_type = parts
+                            self.add_file_to_list(sender, timestamp, filename, int(size), file_type)
+
                     else:
                         # 普通消息
-                        self.add_message("", message)
+                        self.add_message(message)
 
                         # 检查登录成功后的管理员确认
                         if "欢迎加入聊天室" in message:
                             # 检查管理员状态
                             self.root.after(1000, self.check_admin_status)
-            except Exception as ex:
+            except Exception as e:
                 if self.connected:
-                    print(f"接收消息出错: {str(ex)}")
-                    self.connected = False
-
-                    # 保存错误信息到局部变量，避免在lambda中直接引用ex
-                    error_msg = str(ex)
-                    self.root.after(0, lambda: self.connection_status.config(text="连接已断开"))
-                    self.root.after(0, lambda: self.add_system_message("与服务器的连接已断开"))
-                    self.root.after(0, lambda msg=error_msg: self.add_system_message(f"错误信息: {msg}"))
+                    print(f"接收消息出错: {str(e)}")
+                    self.add_system_message(f"与服务器的连接已断开: {str(e)}")
+                    self.disconnect()
                 break
 
-    def update_user_list(self, users):
-        """更新GUI中的用户列表"""
-        # 清空用户列表
-        self.users_listbox.delete(0, END)
-
-        # 排序用户列表（自己始终显示在最上方）
-        sorted_users = sorted([user for user in users if user != self.username])
-        if self.username in users:
-            sorted_users.insert(0, self.username)
-
-        # 移除自己的昵称用于私聊选择
-        private_users = [user for user in sorted_users if user != self.username]
-
-        # 检查是否存在private_target_combo属性再更新
-        if hasattr(self, 'private_target_combo') and self.private_target_combo is not None:
-            self.private_target_combo['values'] = private_users
-
-        # 如果当前选中的私聊对象不在列表中，重置私聊设置
-        if self.message_type.get() == "private":
-            target = self.private_target.get()
-            if target and target not in private_users:
-                self.add_system_message(f"用户 {target} 已离线，私聊已取消")
-                self.message_type.set("public")
-                self.private_target.set("")
-
-        # 添加所有用户到列表框（包括自己）
-        for user in sorted_users:
-            if user == self.username:
-                self.users_listbox.insert(END, f"{user} (你)")
-            else:
-                self.users_listbox.insert(END, user)
-
-        # 显示用户总数
-        total_users = len(users)
-        self.add_system_message(f"当前在线用户: {total_users}人")
-
-    def send_message(self, event=None):
-        if self.connected:
-            message = self.message_entry.get()
-            if message:
-                try:
-                    if self.message_type.get() == "private":
-                        target = self.private_target.get()
-                        if target:
-                            # 发送私聊消息格式: /私聊 目标昵称 消息内容
-                            self.client.send(f"/私聊 {target} {message}".encode('utf-8'))
-                        else:
-                            messagebox.showinfo("提示", "请选择私聊对象")
-                    else:
-                        # 发送公共消息
-                        self.client.send(message.encode('utf-8'))
-
-                    self.message_entry.delete(0, END)
-                except:
-                    self.add_system_message("消息发送失败!")
-                    self.disconnect()
-        return 'break'  # 防止事件继续传播
-
-    def add_message(self, sender, message):
+    def add_message(self, message):
         # 获取当前时间
         current_time = time.strftime("%H:%M:%S", time.localtime())
 
-        formatted_message = f"[{current_time}] {sender}: {message}"
+        # 如果消息已经包含时间戳，不添加
+        if message.startswith("[") and "]" in message[:10]:
+            formatted_message = message
+        else:
+            formatted_message = f"[{current_time}] {message}"
 
         self.message_area.config(state='normal')
         self.message_area.insert(END, f"{formatted_message}\n")
@@ -704,6 +710,499 @@ class ChatClient:
         self.message_history.append(formatted_message)
         if len(self.message_history) > self.max_history:
             self.message_history.pop(0)
+
+    def update_user_list(self, users):
+        """更新GUI中的用户列表"""
+        # 清空用户列表
+        self.users_listbox.delete(0, END)
+
+        # 排序用户列表（自己始终显示在最上方）
+        sorted_users = sorted([user for user in users if user != self.username])
+        if self.username in users:
+            sorted_users.insert(0, self.username)
+
+        # 移除自己的昵称用于私聊选择
+        private_users = [user for user in sorted_users if user != self.username]
+
+        # 检查是否存在private_target_combo属性再更新
+        if hasattr(self, 'private_target_combo') and self.private_target_combo is not None:
+            self.private_target_combo['values'] = private_users
+
+        # 如果当前选中的私聊对象不在列表中，重置私聊设置
+        if self.message_type.get() == "private":
+            target = self.private_target.get()
+            if target and target not in private_users:
+                self.add_system_message(f"用户 {target} 已离线，私聊已取消")
+                self.message_type.set("public")
+                self.private_target.set("")
+
+        # 添加所有用户到列表框（包括自己）
+        for user in sorted_users:
+            if user == self.username:
+                self.users_listbox.insert(END, f"{user} (你)")
+            else:
+                self.users_listbox.insert(END, user)
+
+        # 显示用户总数
+        total_users = len(users)
+        self.add_system_message(f"当前在线用户: {total_users}人")
+
+    def send_message(self, event=None):
+        """发送聊天消息"""
+        message = self.message_entry.get().strip()
+        if message and self.connected:
+            try:
+                if self.message_type.get() == "private":
+                    # 私聊消息
+                    target = self.private_target.get()
+                    if target:
+                        # 消息格式: /私聊 目标用户 消息内容
+                        command = f"/私聊 {target} {message}"
+                        self.client.send(command.encode('utf-8'))
+                        self.add_message(f"[私聊 -> {target}] 您: {message}")
+                    else:
+                        messagebox.showinfo("提示", "请选择私聊对象")
+                else:
+                    # 公共消息
+                    self.client.send(message.encode('utf-8'))
+
+                # 清空输入框
+                self.message_entry.delete(0, END)
+            except:
+                self.add_system_message("发送消息失败，请检查连接")
+                self.disconnect()
+
+    def send_file(self):
+        """发送文件按钮点击处理"""
+        if not self.connected:
+            messagebox.showinfo("提示", "请先连接到服务器")
+            return
+
+        # 选择文件
+        file_path = filedialog.askopenfilename(title="选择要发送的文件")
+        if not file_path:
+            return
+
+        # 获取文件信息
+        file_name = os.path.basename(file_path)
+        file_size = os.path.getsize(file_path)
+
+        # 检查文件大小
+        if file_size > 2 * 1024 * 1024 * 1024:  # 2GB
+            messagebox.showerror("错误", "文件大小超过2GB限制")
+            return
+
+        # 确定发送目标
+        if self.message_type.get() == "private":
+            target = self.private_target.get()
+            if not target:
+                messagebox.showinfo("提示", "请选择私聊对象")
+                return
+        else:
+            target = "public"  # 公共消息
+
+        # 显示上传进度对话框
+        upload_dialog = Toplevel(self.root)
+        upload_dialog.title("文件上传")
+        upload_dialog.geometry("400x150")
+        upload_dialog.transient(self.root)
+        upload_dialog.grab_set()
+
+        # 文件信息
+        ttk.Label(upload_dialog, text=f"文件: {file_name}").pack(padx=10, pady=5, anchor=W)
+        ttk.Label(upload_dialog, text=f"大小: {self.format_file_size(file_size)}").pack(padx=10, pady=5, anchor=W)
+        ttk.Label(upload_dialog, text=f"发送给: {'所有人' if target == 'public' else target}").pack(padx=10, pady=5, anchor=W)
+
+        # 进度条
+        progress_var = DoubleVar()
+        progress_bar = ttk.Progressbar(upload_dialog, variable=progress_var, maximum=100)
+        progress_bar.pack(fill=X, padx=10, pady=10)
+
+        # 状态标签
+        status_var = StringVar(value="准备上传...")
+        status_label = ttk.Label(upload_dialog, textvariable=status_var)
+        status_label.pack(padx=10, pady=5)
+
+        # 开始上传线程
+        upload_thread = threading.Thread(
+            target=self.upload_file_thread,
+            args=(file_path, file_name, file_size, target, upload_dialog, progress_var, status_var)
+        )
+        upload_thread.daemon = True
+        upload_thread.start()
+
+    def upload_file_thread(self, file_path, file_name, file_size, target, dialog, progress_var, status_var):
+        """文件上传线程"""
+        try:
+            # 先通知服务器准备接收文件
+            self.client.send(f"/文件上传 {file_name} {file_size} {target}".encode('utf-8'))
+            time.sleep(0.5)  # 等待服务器处理请求
+
+            # 开始HTTP上传
+            server_port = self.port + 1
+
+            # 获取当前时间作为目录名
+            timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
+
+            # 构建目标路径
+            target_dir = f"{self.username}/{timestamp}"
+            target_path = f"{target_dir}/{file_name}"
+
+            # 不需要在本地创建目录，这是在服务器端创建的
+            # 移除：os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            # 设置分块大小
+            chunk_size = 1024 * 1024  # 1MB
+            total_chunks = file_size // chunk_size + (1 if file_size % chunk_size > 0 else 0)
+
+            # 通过URL编码处理特殊字符
+            encoded_dir = urllib.parse.quote(target_dir)
+            encoded_path = urllib.parse.quote(target_path)
+
+            try:
+                # 建立HTTP连接
+                conn = http.client.HTTPConnection(self.host, server_port)
+
+                # 测试连接是否可用
+                conn.connect()
+
+                # 更新状态
+                dialog.after(0, lambda: status_var.set("连接到文件服务器成功，准备上传..."))
+
+                # 创建目标目录 - MKCOL方法更适合创建目录
+                headers = {"Content-Type": "application/octet-stream"}
+                conn.request("MKCOL", f"/{encoded_dir}", headers=headers)
+                resp = conn.getresponse()
+                resp.read()
+
+                if resp.status >= 400:
+                    raise Exception(f"无法创建目录: HTTP {resp.status} {resp.reason}")
+
+                # 读取并上传文件
+                with open(file_path, 'rb') as f:
+                    uploaded = 0
+                    chunk_num = 0
+
+                    # 更新状态
+                    dialog.after(0, lambda: status_var.set("开始上传文件..."))
+
+                    while uploaded < file_size:
+                        # 读取一块数据
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+
+                        # 上传这一块
+                        conn.request("PUT", f"/{encoded_path}", chunk, headers=headers)
+                        resp = conn.getresponse()
+                        resp.read()
+
+                        if resp.status >= 400:
+                            raise Exception(f"上传失败: HTTP {resp.status} {resp.reason}")
+
+                        # 更新进度
+                        uploaded += len(chunk)
+                        chunk_num += 1
+                        progress = (uploaded / file_size) * 100
+
+                        # 更新UI（线程安全）
+                        dialog.after(0, lambda p=progress: progress_var.set(p))
+                        dialog.after(0, lambda u=uploaded, t=file_size: status_var.set(
+                            f"上传中... {self.format_file_size(u)} / {self.format_file_size(t)}"
+                        ))
+
+                # 上传完成
+                dialog.after(0, lambda: progress_var.set(100))
+                dialog.after(0, lambda: status_var.set("上传完成!"))
+                dialog.after(2000, dialog.destroy)
+
+            except ConnectionRefusedError:
+                raise Exception(f"无法连接到文件服务器 {self.host}:{server_port}，请确认服务器已启动")
+            except http.client.HTTPException as he:
+                raise Exception(f"HTTP错误: {str(he)}")
+
+        except Exception as e:
+            # 显示详细错误
+            error_msg = str(e)
+            print(f"文件上传错误: {error_msg}")  # 添加控制台日志
+            dialog.after(0, lambda: progress_var.set(0))
+            dialog.after(0, lambda: status_var.set(f"上传失败: {error_msg}"))
+            dialog.after(8000, dialog.destroy)  # 延长错误显示时间
+
+    def add_file_to_list(self, sender, timestamp, filename, size, file_type):
+        """向文件列表添加文件"""
+        # 格式化时间显示
+        time_str = self.format_timestamp(timestamp)
+
+        # 格式化文件名（如果太长则截断）
+        max_len = 20
+        display_filename = filename
+        if len(filename) > max_len:
+            display_filename = filename[:max_len-3] + "..."
+
+        # 生成显示的文件条目
+        file_entry = f"[{time_str}] {sender}: {display_filename}"
+
+        # 根据类型添加到不同列表
+        file_data = {
+            "sender": sender,
+            "timestamp": timestamp,
+            "filename": filename,
+            "size": size,
+            "entry": file_entry,
+            "path": f"{sender}/{timestamp}/{filename}"
+        }
+
+        if file_type.lower() == "public":
+            self.public_files.append(file_data)
+            self.public_files_listbox.insert(END, file_entry)
+        else:
+            self.private_files.append(file_data)
+            self.private_files_listbox.insert(END, file_entry)
+
+    def show_file_download_dialog(self, file_type):
+        """显示文件下载对话框"""
+        # 获取选择的文件
+        if file_type == "public":
+            selected = self.public_files_listbox.curselection()
+            if not selected:
+                return
+            file_data = self.public_files[selected[0]]
+        else:
+            selected = self.private_files_listbox.curselection()
+            if not selected:
+                return
+            file_data = self.private_files[selected[0]]
+
+        # 创建下载对话框
+        download_dialog = Toplevel(self.root)
+        download_dialog.title("文件下载")
+        download_dialog.geometry("400x200")
+        download_dialog.transient(self.root)
+        download_dialog.grab_set()
+
+        # 文件信息
+        info_frame = ttk.LabelFrame(download_dialog, text="文件信息")
+        info_frame.pack(fill=X, padx=10, pady=10, expand=True)
+
+        ttk.Label(info_frame, text=f"发送用户: {file_data['sender']}").pack(anchor=W, padx=5, pady=2)
+        ttk.Label(info_frame, text=f"发送时间: {self.format_timestamp(file_data['timestamp'])}").pack(anchor=W, padx=5, pady=2)
+        ttk.Label(info_frame, text=f"文件名: {file_data['filename']}").pack(anchor=W, padx=5, pady=2)
+        ttk.Label(info_frame, text=f"文件大小: {self.format_file_size(file_data['size'])}").pack(anchor=W, padx=5, pady=2)
+
+        # 下载按钮
+        btn_frame = ttk.Frame(download_dialog)
+        btn_frame.pack(fill=X, padx=10, pady=10)
+
+        ttk.Button(btn_frame, text="下载", command=lambda: self.download_file(file_data, download_dialog)).pack(side=LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=download_dialog.destroy).pack(side=RIGHT, padx=5)
+
+    def download_file(self, file_data, dialog):
+        """下载文件"""
+        # 让用户选择保存位置
+        save_path = filedialog.asksaveasfilename(
+            title="保存文件",
+            defaultextension=".*",
+            initialfile=file_data['filename']
+        )
+
+        if not save_path:
+            return
+
+        # 创建下载进度对话框
+        progress_dialog = Toplevel(self.root)
+        progress_dialog.title("下载进度")
+        progress_dialog.geometry("400x120")
+        progress_dialog.transient(self.root)
+        progress_dialog.grab_set()
+
+        # 进度显示
+        ttk.Label(progress_dialog, text=f"下载: {file_data['filename']}").pack(anchor=W, padx=10, pady=5)
+
+        progress_var = DoubleVar()
+        progress_bar = ttk.Progressbar(progress_dialog, variable=progress_var, maximum=100)
+        progress_bar.pack(fill=X, padx=10, pady=5)
+
+        status_var = StringVar(value="准备下载...")
+        status_label = ttk.Label(progress_dialog, textvariable=status_var)
+        status_label.pack(padx=10, pady=5)
+
+        # 关闭原对话框
+        dialog.destroy()
+
+        # 开始下载线程
+        download_thread = threading.Thread(
+            target=self.download_file_thread,
+            args=(file_data, save_path, progress_dialog, progress_var, status_var)
+        )
+        download_thread.daemon = True
+        download_thread.start()
+
+    def download_file_thread(self, file_data, save_path, dialog, progress_var, status_var):
+        """文件下载线程"""
+        try:
+            # 连接HTTP服务器
+            server_port = self.port + 1
+
+            # 添加调试信息
+            print(f"开始下载文件: {file_data['path']}")
+            print(f"发送者: {file_data['sender']}, 文件名: {file_data['filename']}")
+            print(f"目标服务器: {self.host}:{server_port}")
+
+            try:
+                # 建立HTTP连接
+                conn = http.client.HTTPConnection(self.host, server_port)
+
+                # 测试连接是否可用
+                conn.connect()
+
+                # 更新状态
+                dialog.after(0, lambda: status_var.set("已连接到文件服务器，准备下载..."))
+
+                # 正确处理文件路径
+                file_path = file_data['path']
+                print(f"原始文件路径: {file_path}")
+
+                # 使用更简单的方式处理路径，避免多层编码问题
+                simple_path = urllib.parse.quote(file_path)
+                print(f"编码后的路径: {simple_path}")
+
+                # 发送详细的HTTP请求，增加容错性
+                headers = {
+                    "User-Agent": "ChatClientApp/1.0",
+                    "Accept": "*/*",
+                    "Connection": "close"  # 一次性连接
+                }
+
+                # 构造完整URL路径并发送请求
+                conn.request("GET", f"/{simple_path}", headers=headers)
+
+                # 获取响应
+                response = conn.getresponse()
+                print(f"服务器响应: {response.status} {response.reason}")
+
+                if response.status != 200:
+                    # 获取错误详情
+                    error_data = response.read(1024).decode('utf-8', errors='replace')
+                    print(f"服务器错误响应: {error_data}")
+
+                    # 如果是404错误，尝试其他编码方式
+                    if response.status == 404:
+                        # 关闭当前连接
+                        conn.close()
+
+                        # 尝试另一种编码方式
+                        print("尝试替代编码方式...")
+                        conn = http.client.HTTPConnection(self.host, server_port)
+
+                        # 尝试路径分段编码
+                        path_parts = file_path.split('/')
+                        encoded_path = '/'.join(urllib.parse.quote(part) for part in path_parts if part)
+                        print(f"替代编码路径: {encoded_path}")
+
+                        conn.request("GET", f"/{encoded_path}", headers=headers)
+                        response = conn.getresponse()
+                        print(f"替代请求响应: {response.status} {response.reason}")
+
+                        if response.status != 200:
+                            raise Exception(f"文件不存在或无法访问: {response.status} {response.reason}")
+                    else:
+                        raise Exception(f"HTTP错误: {response.status} {response.reason}")
+
+                # 获取文件大小
+                file_size = int(response.getheader('Content-Length', file_data['size']))
+                print(f"准备下载文件，大小: {self.format_file_size(file_size)}")
+
+                # 更新状态
+                dialog.after(0, lambda: status_var.set("开始下载文件..."))
+
+                # 开始下载
+                with open(save_path, 'wb') as f:
+                    downloaded = 0
+                    chunk_size = 64 * 1024  # 使用更大的块大小提高效率
+
+                    # 分块下载
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        # 输出进度日志
+                        if downloaded % (1024 * 1024) == 0:  # 每MB输出一次
+                            print(f"已下载: {self.format_file_size(downloaded)} / {self.format_file_size(file_size)}")
+
+                        # 更新UI进度
+                        progress = (downloaded / file_size) * 100 if file_size > 0 else 0
+                        dialog.after(0, lambda p=progress: progress_var.set(p))
+                        dialog.after(0, lambda d=downloaded, t=file_size: status_var.set(
+                            f"下载中... {self.format_file_size(d)} / {self.format_file_size(t)}"
+                        ))
+
+                # 下载完成，检查文件完整性
+                actual_size = os.path.getsize(save_path)
+                print(f"下载完成: {save_path}")
+                print(f"期望大小: {file_size}, 实际大小: {actual_size}")
+
+                if actual_size != file_size and file_size > 0:
+                    print("警告: 文件大小不匹配，可能下载不完整")
+
+                # 更新UI
+                dialog.after(0, lambda: progress_var.set(100))
+                # 下载完成
+                print(f"文件下载完成: {save_path}")
+                dialog.after(0, lambda: progress_var.set(100))
+                dialog.after(0, lambda: status_var.set("下载完成!"))
+                dialog.after(2000, dialog.destroy)
+
+            except ConnectionRefusedError as cre:
+                error_msg = f"无法连接到文件服务器 {self.host}:{server_port}，请确认服务器已启动"
+                print(f"连接错误: {error_msg}")
+                raise Exception(error_msg)
+            except socket.timeout:
+                error_msg = "连接超时，请检查网络连接或服务器状态"
+                print(f"超时错误: {error_msg}")
+                raise Exception(error_msg)
+            except http.client.HTTPException as he:
+                error_msg = f"HTTP错误: {str(he)}"
+                print(f"HTTP异常: {error_msg}")
+                raise Exception(error_msg)
+
+        except Exception as e:
+            # 显示详细错误
+            error_msg = str(e)
+            print(f"文件下载错误: {error_msg}")
+            dialog.after(0, lambda: progress_var.set(0))
+            dialog.after(0, lambda: status_var.set(f"下载失败: {error_msg}"))
+            dialog.after(8000, dialog.destroy)  # 延长错误显示时间
+
+    def format_file_size(self, size_bytes):
+        """格式化文件大小显示"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes/1024:.2f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes/(1024*1024):.2f} MB"
+        else:
+            return f"{size_bytes/(1024*1024*1024):.2f} GB"
+
+    def format_timestamp(self, timestamp):
+        """格式化时间戳为可读格式"""
+        try:
+            # 假设时间戳格式为 YYYYMMDDHHMMSS
+            year = timestamp[0:4]
+            month = timestamp[4:6]
+            day = timestamp[6:8]
+            hour = timestamp[8:10]
+            minute = timestamp[10:12]
+            second = timestamp[12:14]
+
+            return f"{month}-{day} {hour}:{minute}"
+        except:
+            return timestamp
 
     def show_message_history(self):
         # 显示消息历史记录
