@@ -1860,6 +1860,9 @@ class ChatClient:
             try:
                 # 发送查询命令
                 self.client.send("/我是管理员吗".encode('utf-8'))
+                # 添加短暂延迟后再请求用户列表
+                time.sleep(0.3)
+                self.client.send("/用户列表".encode('utf-8'))
                 self.add_system_message("正在检查管理员权限...")
             except:
                 pass
